@@ -12,35 +12,29 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.studymate.app.ui.StudyMateApp
-import com.studymate.app.ui.theme.StudyMateTheme
 
 /**
- * Single-activity host. The app is fully Jetpack Compose; this activity only installs the
- * content and enables edge-to-edge. Heavy models are NOT loaded here — they load lazily
- * the first time the user asks a question (see [LlmManager] / [StudyMateApp]).
- *
- * `setContent` is wrapped so that if the Compose tree throws, we fall back to a plain
- * error screen instead of crashing the whole app (helps diagnose device-specific issues).
+ * Single-activity host for StudyMate. Fully Jetpack Compose with edge-to-edge styling.
  */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         try {
             enableEdgeToEdge()
-        } catch (e: Exception) {
-            // Edge-to-edge is cosmetic; ignore failures on exotic devices/themes.
+        } catch (_: Exception) {
+            // Edge-to-edge is cosmetic; safe fallback on legacy themes
         }
         try {
             setContent {
-                StudyMateTheme {
-                    Surface(modifier = Modifier.fillMaxSize()) {
-                        StudyMateApp()
-                    }
+                CompositionLocalProvider(LocalLifecycleOwner provides this) {
+                    StudyMateApp()
                 }
             }
         } catch (e: Exception) {
@@ -53,25 +47,31 @@ class MainActivity : ComponentActivity() {
         try {
             setContent { ErrorScreen(e) }
         } catch (_: Exception) {
-            // Last resort: leave a blank activity rather than crashing.
+            // Safe fallback
         }
     }
-}
 
-@Composable
-private fun ErrorScreen(e: Throwable) {
-    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        Column(
-            modifier = Modifier.fillMaxSize().padding(24.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text("StudyMate could not start.", fontSize = 18.sp, color = MaterialTheme.colorScheme.error)
-            Text(
-                text = e.message ?: e.javaClass.name,
-                modifier = Modifier.padding(top = 12.dp),
-                fontSize = 13.sp
-            )
+    @Composable
+    private fun ErrorScreen(e: Throwable) {
+        Surface(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(24.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = "Application Error",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.error
+                )
+                Text(
+                    text = e.message ?: "Unknown startup failure",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+            }
         }
     }
 }

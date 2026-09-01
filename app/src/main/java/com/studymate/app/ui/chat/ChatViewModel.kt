@@ -1,9 +1,13 @@
 package com.studymate.app.ui.chat
 
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.studymate.app.StudyMateApp
+import com.studymate.app.data.SettingsManager
 import com.studymate.app.llm.LlmManager
+import com.studymate.app.llm.ModelFileInfo
+import com.studymate.app.llm.ModelLoader
 import com.studymate.app.rag.PromptBuilder
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -12,14 +16,11 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
- * ViewModel for the "Chat" (Normal Mode) tab.
- *
- * Drives a standard chat list: appends the user's message, streams the LLM's reply token
- * by token, and supports clearing the conversation. Uses the shared [LlmManager] from the
- * [StudyMateApp], which handles lazy load/unload for the 1GB-RAM constraint.
+ * ViewModel for the ChatGPT-inspired offline conversational interface.
  */
 class ChatViewModel(
-    private val llm: LlmManager = StudyMateApp.instance.llmManager
+    private val llm: LlmManager = StudyMateApp.instance.llmManager,
+    private val settings: SettingsManager = StudyMateApp.instance.settingsManager
 ) : ViewModel() {
 
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
@@ -31,21 +32,40 @@ class ChatViewModel(
     private val _modelAvailable = MutableStateFlow(llm.isModelAvailable())
     val modelAvailable: StateFlow<Boolean> = _modelAvailable.asStateFlow()
 
+    private val _modelName = MutableStateFlow(llm.getActiveModelDisplayName())
+    val modelName: StateFlow<String> = _modelName.asStateFlow()
+
+    private val _availableModels = MutableStateFlow<List<ModelFileInfo>>(emptyList())
+    val availableModels: StateFlow<List<ModelFileInfo>> = _availableModels.asStateFlow()
+
+    private val _isImportingModel = MutableStateFlow(false)
+    val isImportingModel: StateFlow<Boolean> = _isImportingModel.asStateFlow()
+
+    private val _importStatus = MutableStateFlow("")
+    val importStatus: StateFlow<String> = _importStatus.asStateFlow()
+
+    init {
+        refreshModels()
+    }
+
+    fun refreshModels() {
+        val context = StudyMateApp.instance
+        val selected = settings.selectedModelName.value
+        _modelAvailable.value = llm.isModelAvailable()
+        _modelName.value = llm.getActiveModelDisplayName()
+        _availableModels.value = ModelLoader.getAvailableModels(context, selected)
+    }
+
+    fun selectModel(fileName: String?) {
+        settings.setSelectedModel(fileName)
+        llm.unload()
+        refreshModels()
+    }
+
     fun sendQuestion(question: String) {
         val q = question.trim()
         if (q.isEmpty() || _isGenerating.value) return
 
-        if (!_modelAvailable.value) {
-            _modelAvailable.value = llm.isModelAvailable()
-            if (!_modelAvailable.value) {
-                _messages.update { it + ChatMessage(ChatMessage.nextId(), ChatMessage.Role.ASSISTANT,
-                    "No LLM model found. Add a quantized model file as described in the README, then reopen the app.",
-                    isError = true) }
-                return
-            }
-        }
-
-        // Append user message + a placeholder assistant message we will stream into.
         val userMsg = ChatMessage(ChatMessage.nextId(), ChatMessage.Role.USER, q)
         val assistantMsg = ChatMessage(
             id = ChatMessage.nextId(),
@@ -58,27 +78,101 @@ class ChatViewModel(
 
         viewModelScope.launch {
             try {
-                val prompt = PromptBuilder.chatPrompt(q)
+                val prompt = PromptBuilder.chatPrompt(q, settings.systemInstruction.value)
                 llm.generateStream(prompt) { token ->
                     appendToLast(token)
                 }
                 finalizeLast(isError = false)
             } catch (e: Exception) {
-                replaceLast("Error: ${e.message ?: "generation failed"}", isError = true)
+                replaceLast("Error: ${e.message ?: "Generation encountered an issue."}", isError = true)
             } finally {
                 _isGenerating.value = false
             }
         }
     }
 
+    fun regenerateLast() {
+        if (_isGenerating.value) return
+        val list = _messages.value
+        if (list.isEmpty()) return
+
+        // Find last user question
+        val lastUserMsg = list.lastOrNull { it.role == ChatMessage.Role.USER } ?: return
+        
+        // Remove trailing assistant response if any
+        if (list.last().role == ChatMessage.Role.ASSISTANT) {
+            _messages.update { it.dropLast(1) }
+        }
+
+        val assistantMsg = ChatMessage(
+            id = ChatMessage.nextId(),
+            role = ChatMessage.Role.ASSISTANT,
+            content = "",
+            isStreaming = true
+        )
+        _messages.update { it + assistantMsg }
+        _isGenerating.value = true
+
+        viewModelScope.launch {
+            try {
+                val prompt = PromptBuilder.chatPrompt(lastUserMsg.content, settings.systemInstruction.value)
+                llm.generateStream(prompt) { token ->
+                    appendToLast(token)
+                }
+                finalizeLast(isError = false)
+            } catch (e: Exception) {
+                replaceLast("Error: ${e.message ?: "Generation encountered an issue."}", isError = true)
+            } finally {
+                _isGenerating.value = false
+            }
+        }
+    }
+
+    fun importModel(uri: Uri, displayName: String) {
+        val context = StudyMateApp.instance
+        viewModelScope.launch {
+            _isImportingModel.value = true
+            _importStatus.value = "Importing $displayName…"
+            try {
+                ModelLoader.importModelFromUri(context, uri, displayName) { copied, total ->
+                    val progressText = if (total > 0) {
+                        "${ModelLoader.formatBytes(copied)} / ${ModelLoader.formatBytes(total)}"
+                    } else {
+                        ModelLoader.formatBytes(copied)
+                    }
+                    _importStatus.value = "Copying model file: $progressText"
+                }
+                selectModel(displayName)
+                refreshModels()
+                _importStatus.value = "Model imported successfully!"
+                _messages.update {
+                    it + ChatMessage(
+                        ChatMessage.nextId(),
+                        ChatMessage.Role.ASSISTANT,
+                        "Model **$displayName** imported and activated successfully! You can now run local offline inference."
+                    )
+                }
+            } catch (e: Exception) {
+                _importStatus.value = "Failed: ${e.message}"
+            } finally {
+                _isImportingModel.value = false
+            }
+        }
+    }
+
+    fun deleteModel(fileName: String) {
+        val context = StudyMateApp.instance
+        ModelLoader.deleteModel(context, fileName)
+        if (settings.selectedModelName.value == fileName) {
+            settings.setSelectedModel(null)
+        }
+        llm.unload()
+        refreshModels()
+    }
+
     fun clearChat() {
         if (_isGenerating.value) return
         _messages.value = emptyList()
-    }
-
-    /** Refresh model availability (e.g. after user adds a model via adb). */
-    fun refreshModelAvailability() {
-        _modelAvailable.value = llm.isModelAvailable()
     }
 
     private fun appendToLast(token: String) {

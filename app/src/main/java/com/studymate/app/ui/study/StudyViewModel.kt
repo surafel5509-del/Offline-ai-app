@@ -15,11 +15,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
- * ViewModel for the "Study Assistant" (RAG) tab.
- *
- * Owns the RAG workflow: file selection → indexing → Q&A. All long-running work runs in
- * [viewModelScope] on Dispatchers.IO (inside [RagService]); this VM only maps results to
- * [StudyUiState] and never blocks the main thread.
+ * ViewModel for the comprehensive Study Assistant workspace.
  */
 class StudyViewModel(
     private val repository: DocumentRepository = StudyMateApp.instance.repository,
@@ -29,7 +25,9 @@ class StudyViewModel(
     private val _state = MutableStateFlow(StudyUiState())
     val state: StateFlow<StudyUiState> = _state.asStateFlow()
 
-    init { loadDocuments() }
+    init {
+        loadDocuments()
+    }
 
     fun loadDocuments() {
         viewModelScope.launch {
@@ -44,20 +42,40 @@ class StudyViewModel(
     }
 
     fun selectDocument(id: Long) {
-        _state.update { it.copy(selectedDocumentId = id, answer = "", sources = emptyList(), showSources = false) }
+        _state.update {
+            it.copy(
+                selectedDocumentId = id,
+                answer = "",
+                retrievedChunks = emptyList(),
+                showSources = false,
+                summary = "",
+                flashcards = emptyList(),
+                quizQuestions = emptyList(),
+                quizSelectedAnswers = emptyMap(),
+                currentCardIndex = 0,
+                isCardFlipped = false
+            )
+        }
     }
 
-    /**
-     * Index a freshly picked file. The URI is read once for display name + mime type,
-     * then handed to [RagService.indexDocument] which extracts, chunks, embeds, and stores.
-     */
+    fun setSubTab(tab: StudySubTab) {
+        _state.update { it.copy(selectedSubTab = tab) }
+        val docId = _state.value.selectedDocumentId ?: return
+        when (tab) {
+            StudySubTab.SUMMARY -> if (_state.value.summary.isBlank()) generateSummary(docId)
+            StudySubTab.FLASHCARDS -> if (_state.value.flashcards.isEmpty()) generateFlashcards(docId)
+            StudySubTab.QUIZ -> if (_state.value.quizQuestions.isEmpty()) generateQuiz(docId)
+            else -> Unit
+        }
+    }
+
     fun indexFile(uri: Uri) {
         val context = StudyMateApp.instance
         val name = IoUtils.displayName(context, uri)
         val mime = IoUtils.mimeType(context, uri)
 
         viewModelScope.launch {
-            _state.update { it.copy(isIndexing = true, indexStage = "Starting…", error = null) }
+            _state.update { it.copy(isIndexing = true, indexStage = "Reading document…", error = null) }
             try {
                 val id = ragService.indexDocument(uri, name, mime) { progress ->
                     _state.update {
@@ -70,18 +88,17 @@ class StudyViewModel(
                         documents = docs,
                         selectedDocumentId = id,
                         isIndexing = false,
-                        indexStage = "Done: ${docs.firstOrNull { d -> d.id == id }?.chunkCount ?: 0} chunks indexed."
+                        indexStage = "Completed"
                     )
                 }
             } catch (e: Exception) {
                 _state.update {
-                    it.copy(isIndexing = false, indexStage = "", error = e.message ?: "Indexing failed")
+                    it.copy(isIndexing = false, indexStage = "", error = e.message ?: "Document indexing failed")
                 }
             }
         }
     }
 
-    /** Ask a question about the currently selected document. */
     fun askQuestion(question: String) {
         val q = question.trim()
         if (q.isEmpty()) return
@@ -89,7 +106,13 @@ class StudyViewModel(
 
         viewModelScope.launch {
             _state.update {
-                it.copy(isAnswering = true, answer = "", sources = emptyList(), showSources = false, error = null)
+                it.copy(
+                    isAnswering = true,
+                    answer = "",
+                    retrievedChunks = emptyList(),
+                    showSources = false,
+                    error = null
+                )
             }
             try {
                 val result = ragService.answerQuestion(docId, q)
@@ -97,16 +120,117 @@ class StudyViewModel(
                     it.copy(
                         isAnswering = false,
                         answer = result.answer,
-                        sources = result.sources.map { c -> c.text },
-                        showSources = true
+                        retrievedChunks = result.sources,
+                        showSources = result.sources.isNotEmpty()
                     )
                 }
             } catch (e: Exception) {
                 _state.update {
-                    it.copy(isAnswering = false, error = e.message ?: "Could not generate an answer")
+                    it.copy(isAnswering = false, error = e.message ?: "Could not generate answer")
                 }
             }
         }
+    }
+
+    fun generateSummary(documentId: Long) {
+        viewModelScope.launch {
+            _state.update { it.copy(isGeneratingSummary = true, error = null) }
+            try {
+                val summaryText = ragService.generateSummary(documentId)
+                _state.update { it.copy(isGeneratingSummary = false, summary = summaryText) }
+            } catch (e: Exception) {
+                _state.update { it.copy(isGeneratingSummary = false, error = e.message ?: "Failed generating summary") }
+            }
+        }
+    }
+
+    fun generateFlashcards(documentId: Long) {
+        viewModelScope.launch {
+            _state.update { it.copy(isGeneratingFlashcards = true, error = null) }
+            try {
+                val cards = ragService.generateFlashcards(documentId)
+                _state.update {
+                    it.copy(
+                        isGeneratingFlashcards = false,
+                        flashcards = cards,
+                        currentCardIndex = 0,
+                        isCardFlipped = false
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update { it.copy(isGeneratingFlashcards = false, error = e.message ?: "Failed creating flashcards") }
+            }
+        }
+    }
+
+    fun generateQuiz(documentId: Long) {
+        viewModelScope.launch {
+            _state.update { it.copy(isGeneratingQuiz = true, error = null) }
+            try {
+                val quiz = ragService.generateQuiz(documentId)
+                _state.update {
+                    it.copy(
+                        isGeneratingQuiz = false,
+                        quizQuestions = quiz,
+                        quizSelectedAnswers = emptyMap()
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update { it.copy(isGeneratingQuiz = false, error = e.message ?: "Failed generating quiz") }
+            }
+        }
+    }
+
+    fun selectQuizAnswer(quizId: Int, optionIndex: Int) {
+        _state.update {
+            val updated = it.quizSelectedAnswers.toMutableMap()
+            updated[quizId] = optionIndex
+            it.copy(quizSelectedAnswers = updated)
+        }
+    }
+
+    fun flipCard() {
+        _state.update { it.copy(isCardFlipped = !it.isCardFlipped) }
+    }
+
+    fun toggleMasteredCard(cardId: Int) {
+        _state.update {
+            val updated = it.masteredCardIds.toMutableSet()
+            if (updated.contains(cardId)) updated.remove(cardId) else updated.add(cardId)
+            it.copy(masteredCardIds = updated)
+        }
+    }
+
+    fun nextCard() {
+        _state.update {
+            if (it.flashcards.isNotEmpty()) {
+                val nextIdx = (it.currentCardIndex + 1) % it.flashcards.size
+                it.copy(currentCardIndex = nextIdx, isCardFlipped = false)
+            } else it
+        }
+    }
+
+    fun prevCard() {
+        _state.update {
+            if (it.flashcards.isNotEmpty()) {
+                val prevIdx = if (it.currentCardIndex - 1 < 0) it.flashcards.size - 1 else it.currentCardIndex - 1
+                it.copy(currentCardIndex = prevIdx, isCardFlipped = false)
+            } else it
+        }
+    }
+
+    fun shuffleFlashcards() {
+        _state.update {
+            it.copy(
+                flashcards = it.flashcards.shuffled(),
+                currentCardIndex = 0,
+                isCardFlipped = false
+            )
+        }
+    }
+
+    fun toggleShowSources() {
+        _state.update { it.copy(showSources = !it.showSources) }
     }
 
     fun deleteDocument(doc: DocumentEntity) {
@@ -114,13 +238,22 @@ class StudyViewModel(
             repository.deleteDocument(doc)
             loadDocuments()
             if (_state.value.selectedDocumentId == doc.id) {
-                _state.update { it.copy(selectedDocumentId = null, answer = "", sources = emptyList()) }
+                _state.update {
+                    it.copy(
+                        selectedDocumentId = null,
+                        answer = "",
+                        retrievedChunks = emptyList(),
+                        summary = "",
+                        flashcards = emptyList(),
+                        quizQuestions = emptyList()
+                    )
+                }
             }
         }
     }
 
     fun clearAnswer() {
-        _state.update { it.copy(answer = "", sources = emptyList(), showSources = false) }
+        _state.update { it.copy(answer = "", retrievedChunks = emptyList(), showSources = false) }
     }
 
     fun dismissError() {

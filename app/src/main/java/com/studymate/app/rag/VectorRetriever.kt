@@ -13,14 +13,16 @@ import com.studymate.app.util.VectorMath
 class VectorRetriever(private val chunks: List<RetrievedChunk>) {
 
     /**
-     * Return the top [k] most similar chunks to [queryEmbedding].
+     * Return the top [k] most similar chunks to [queryEmbedding] meeting [minScore].
      * If [chunks] is empty, returns an empty list.
      */
-    fun retrieve(queryEmbedding: FloatArray, k: Int = 4): List<RetrievedChunk> {
+    fun retrieve(queryEmbedding: FloatArray, k: Int = 4, minScore: Float = 0.0f): List<RetrievedChunk> {
         if (chunks.isEmpty()) return emptyList()
-        return chunks
+        val scored = chunks
             .map { it.copy(score = VectorMath.cosineSimilarity(queryEmbedding, it.embedding)) }
             .sortedByDescending { it.score }
-            .take(k)
+
+        val filtered = scored.filter { it.score >= minScore }
+        return (if (filtered.isNotEmpty()) filtered else scored).take(k)
     }
 }
