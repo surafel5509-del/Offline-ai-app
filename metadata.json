@@ -1,0 +1,6 @@
+{
+  "name": "StudyMate",
+  "description": "Offline AI study assistant with LLM Q&A and RAG document analysis",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
